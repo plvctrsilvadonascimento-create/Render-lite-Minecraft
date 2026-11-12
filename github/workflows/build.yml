@@ -1,0 +1,374 @@
+# Cole este arquivo em .github/workflows/build.yml num repositorio do GitHub.
+# Ele cria o projeto do mod RenderLite sozinho, compila e entrega o .jar em Artifacts.
+name: Gerar RenderLite jar
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Gradle 8.5
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.5'
+
+      - name: Criar projeto
+        run: |
+          set -e
+          mkdir -p src/main/java/dev/renderlite/mixin src/main/resources
+          cat > gradle.properties <<'RL_EOF'
+          org.gradle.jvmargs=-Xmx2G
+          org.gradle.parallel=true
+
+          minecraft_version=1.20.1
+          yarn_mappings=1.20.1+build.10
+          loader_version=0.15.11
+
+          mod_version=1.0.0
+          maven_group=dev.renderlite
+          archives_base_name=renderlite
+          RL_EOF
+          cat > settings.gradle <<'RL_EOF'
+          pluginManagement {
+              repositories {
+                  maven {
+                      name = 'Fabric'
+                      url = 'https://maven.fabricmc.net/'
+                  }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          RL_EOF
+          cat > build.gradle <<'RL_EOF'
+          plugins {
+              id 'fabric-loom' version '1.5-SNAPSHOT'
+          }
+
+          version = project.mod_version
+          group = project.maven_group
+
+          base {
+              archivesName = project.archives_base_name
+          }
+
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+          }
+
+          processResources {
+              inputs.property "version", project.version
+              filesMatching("fabric.mod.json") {
+                  expand "version": project.version
+              }
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              it.options.encoding = "UTF-8"
+              it.options.release = 17
+          }
+
+          java {
+              sourceCompatibility = JavaVersion.VERSION_17
+              targetCompatibility = JavaVersion.VERSION_17
+          }
+          RL_EOF
+          cat > src/main/resources/fabric.mod.json <<'RL_EOF'
+          {
+            "schemaVersion": 1,
+            "id": "renderlite",
+            "version": "${version}",
+            "name": "RenderLite",
+            "description": "Otimizacoes leves de render: culling de mobs e block entities, limite de particulas e throttle de animacao de textura. Compativel com Sodium e Iris.",
+            "license": "MIT",
+            "environment": "client",
+            "mixins": [
+              "renderlite.mixins.json"
+            ],
+            "depends": {
+              "fabricloader": ">=0.14.21",
+              "minecraft": "1.20.1",
+              "java": ">=17"
+            }
+          }
+          RL_EOF
+          cat > src/main/resources/renderlite.mixins.json <<'RL_EOF'
+          {
+            "required": false,
+            "minVersion": "0.8",
+            "package": "dev.renderlite.mixin",
+            "compatibilityLevel": "JAVA_17",
+            "client": [
+              "BlockEntityRenderDispatcherMixin",
+              "EntityRenderDispatcherMixin",
+              "ParticleManagerMixin",
+              "SpriteAtlasTextureMixin"
+            ]
+          }
+          RL_EOF
+          cat > src/main/java/dev/renderlite/Config.java <<'RL_EOF'
+          package dev.renderlite;
+
+          import net.fabricmc.loader.api.FabricLoader;
+
+          import java.io.IOException;
+          import java.io.InputStream;
+          import java.nio.file.Files;
+          import java.nio.file.Path;
+          import java.util.Properties;
+
+          /**
+           * Le config/renderlite.properties. Se o arquivo nao existir, cria com os valores padrao.
+           * Valor 0 desliga a opcao.
+           */
+          public final class Config {
+
+              /** Mobs (menos jogadores) alem dessa distancia, em blocos, nao sao desenhados. */
+              public static final int MOB_DISTANCE;
+              /** Itens no chao, orbs de XP e molduras alem dessa distancia nao sao desenhados. */
+              public static final int ITEM_DISTANCE;
+              /** Baus, placas, banners etc. alem dessa distancia nao sao desenhados. */
+              public static final int BLOCK_ENTITY_DISTANCE;
+              /** Maximo de particulas novas por tick. */
+              public static final int MAX_PARTICLES_PER_TICK;
+              /** Texturas animadas atualizam 1 vez a cada N ticks (1 = normal). */
+              public static final int ANIMATION_INTERVAL;
+
+              private static final String DEFAULTS = ""
+                      + "# RenderLite - distancias em blocos. 0 = desliga a opcao.\n"
+                      + "# Mobs (menos jogadores) alem dessa distancia nao sao desenhados\n"
+                      + "mob_distance=48\n"
+                      + "# Itens no chao, orbs de XP e molduras\n"
+                      + "item_distance=24\n"
+                      + "# Baus, placas, banners etc (beacon e portal do End nao sao afetados)\n"
+                      + "block_entity_distance=32\n"
+                      + "# Maximo de particulas novas por tick\n"
+                      + "max_particles_per_tick=100\n"
+                      + "# Texturas animadas (agua, lava...) atualizam 1 vez a cada N ticks. 1 = normal\n"
+                      + "animation_interval=2\n";
+
+              static {
+                  Properties props = new Properties();
+                  Path file = FabricLoader.getInstance().getConfigDir().resolve("renderlite.properties");
+                  try {
+                      if (Files.exists(file)) {
+                          try (InputStream in = Files.newInputStream(file)) {
+                              props.load(in);
+                          }
+                      } else {
+                          Files.createDirectories(file.getParent());
+                          Files.writeString(file, DEFAULTS);
+                      }
+                  } catch (IOException | RuntimeException e) {
+                      // sem acesso ao arquivo: fica com os valores padrao
+                  }
+                  MOB_DISTANCE = read(props, "mob_distance", 48);
+                  ITEM_DISTANCE = read(props, "item_distance", 24);
+                  BLOCK_ENTITY_DISTANCE = read(props, "block_entity_distance", 32);
+                  MAX_PARTICLES_PER_TICK = read(props, "max_particles_per_tick", 100);
+                  ANIMATION_INTERVAL = Math.max(1, read(props, "animation_interval", 2));
+              }
+
+              private static int read(Properties props, String key, int fallback) {
+                  try {
+                      return Math.max(0, Integer.parseInt(props.getProperty(key, "").trim()));
+                  } catch (NumberFormatException e) {
+                      return fallback;
+                  }
+              }
+
+              private Config() {
+              }
+          }
+          RL_EOF
+          cat > src/main/java/dev/renderlite/mixin/BlockEntityRenderDispatcherMixin.java <<'RL_EOF'
+          package dev.renderlite.mixin;
+
+          import dev.renderlite.Config;
+          import net.minecraft.block.entity.BlockEntity;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.render.VertexConsumerProvider;
+          import net.minecraft.client.render.block.entity.BlockEntityRenderDispatcher;
+          import net.minecraft.client.render.block.entity.BlockEntityRenderer;
+          import net.minecraft.client.util.math.MatrixStack;
+          import net.minecraft.util.math.BlockPos;
+          import net.minecraft.util.math.Vec3d;
+          import org.spongepowered.asm.mixin.Mixin;
+          import org.spongepowered.asm.mixin.injection.At;
+          import org.spongepowered.asm.mixin.injection.Inject;
+          import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+          /** Corta baus, placas, banners etc. distantes (o vanilla desenha ate 64 blocos). */
+          @Mixin(BlockEntityRenderDispatcher.class)
+          public abstract class BlockEntityRenderDispatcherMixin {
+
+              @Inject(
+                      method = "render(Lnet/minecraft/block/entity/BlockEntity;FLnet/minecraft/client/util/math/MatrixStack;Lnet/minecraft/client/render/VertexConsumerProvider;)V",
+                      at = @At("HEAD"),
+                      cancellable = true)
+              private void renderlite$distanceCull(BlockEntity blockEntity, float tickDelta, MatrixStack matrices,
+                                                   VertexConsumerProvider consumers, CallbackInfo ci) {
+                  int limit = Config.BLOCK_ENTITY_DISTANCE;
+                  if (limit <= 0) {
+                      return;
+                  }
+
+                  // beacon, portal do End etc. tem distancia maior que 64 de proposito: nao mexe
+                  BlockEntityRenderer<BlockEntity> renderer = ((BlockEntityRenderDispatcher) (Object) this).get(blockEntity);
+                  if (renderer == null || renderer.getRenderDistance() > 64) {
+                      return;
+                  }
+
+                  Vec3d cam = MinecraftClient.getInstance().gameRenderer.getCamera().getPos();
+                  BlockPos pos = blockEntity.getPos();
+                  double dx = pos.getX() + 0.5 - cam.x;
+                  double dy = pos.getY() + 0.5 - cam.y;
+                  double dz = pos.getZ() + 0.5 - cam.z;
+                  if (dx * dx + dy * dy + dz * dz > (double) limit * limit) {
+                      ci.cancel();
+                  }
+              }
+          }
+          RL_EOF
+          cat > src/main/java/dev/renderlite/mixin/EntityRenderDispatcherMixin.java <<'RL_EOF'
+          package dev.renderlite.mixin;
+
+          import dev.renderlite.Config;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.render.Frustum;
+          import net.minecraft.client.render.entity.EntityRenderDispatcher;
+          import net.minecraft.entity.Entity;
+          import net.minecraft.entity.ExperienceOrbEntity;
+          import net.minecraft.entity.ItemEntity;
+          import net.minecraft.entity.LivingEntity;
+          import net.minecraft.entity.decoration.ItemFrameEntity;
+          import net.minecraft.entity.player.PlayerEntity;
+          import org.spongepowered.asm.mixin.Mixin;
+          import org.spongepowered.asm.mixin.injection.At;
+          import org.spongepowered.asm.mixin.injection.Inject;
+          import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+          /** Corta mobs e itens distantes antes de qualquer desenho (mais agressivo que o vanilla). */
+          @Mixin(EntityRenderDispatcher.class)
+          public abstract class EntityRenderDispatcherMixin {
+
+              @Inject(method = "shouldRender", at = @At("HEAD"), cancellable = true)
+              private void renderlite$distanceCull(Entity entity, Frustum frustum, double x, double y, double z,
+                                                   CallbackInfoReturnable<Boolean> cir) {
+                  if (entity instanceof PlayerEntity) {
+                      return;
+                  }
+
+                  int limit;
+                  if (entity instanceof LivingEntity) {
+                      limit = Config.MOB_DISTANCE;
+                  } else if (entity instanceof ItemEntity
+                          || entity instanceof ExperienceOrbEntity
+                          || entity instanceof ItemFrameEntity) {
+                      limit = Config.ITEM_DISTANCE;
+                  } else {
+                      return; // projeteis, barcos, TNT etc: fica como no vanilla
+                  }
+                  if (limit <= 0) {
+                      return;
+                  }
+
+                  // entidades grandes (ghast, dragao, golem...) e brilhando nunca somem
+                  if (entity.isGlowing() || entity.getBoundingBox().getAverageSideLength() > 2.0) {
+                      return;
+                  }
+
+                  // nunca esconde o que o jogador esta montando
+                  Entity camera = MinecraftClient.getInstance().getCameraEntity();
+                  if (camera != null && (entity == camera || entity == camera.getVehicle())) {
+                      return;
+                  }
+
+                  // x, y, z = posicao da camera
+                  if (entity.squaredDistanceTo(x, y, z) > (double) limit * limit) {
+                      cir.setReturnValue(false);
+                  }
+              }
+          }
+          RL_EOF
+          cat > src/main/java/dev/renderlite/mixin/ParticleManagerMixin.java <<'RL_EOF'
+          package dev.renderlite.mixin;
+
+          import dev.renderlite.Config;
+          import net.minecraft.client.particle.Particle;
+          import net.minecraft.client.particle.ParticleManager;
+          import org.spongepowered.asm.mixin.Mixin;
+          import org.spongepowered.asm.mixin.Unique;
+          import org.spongepowered.asm.mixin.injection.At;
+          import org.spongepowered.asm.mixin.injection.Inject;
+          import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+          /** Limita quantas particulas novas entram por tick (explosoes, fogueiras, quebra em massa). */
+          @Mixin(ParticleManager.class)
+          public abstract class ParticleManagerMixin {
+
+              @Unique
+              private int renderlite$spawned;
+
+              @Inject(method = "tick", at = @At("HEAD"))
+              private void renderlite$resetCounter(CallbackInfo ci) {
+                  renderlite$spawned = 0;
+              }
+
+              @Inject(method = "addParticle(Lnet/minecraft/client/particle/Particle;)V", at = @At("HEAD"), cancellable = true)
+              private void renderlite$limit(Particle particle, CallbackInfo ci) {
+                  int max = Config.MAX_PARTICLES_PER_TICK;
+                  if (max > 0 && ++renderlite$spawned > max) {
+                      ci.cancel();
+                  }
+              }
+          }
+          RL_EOF
+          cat > src/main/java/dev/renderlite/mixin/SpriteAtlasTextureMixin.java <<'RL_EOF'
+          package dev.renderlite.mixin;
+
+          import dev.renderlite.Config;
+          import net.minecraft.client.texture.SpriteAtlasTexture;
+          import org.spongepowered.asm.mixin.Mixin;
+          import org.spongepowered.asm.mixin.Unique;
+          import org.spongepowered.asm.mixin.injection.At;
+          import org.spongepowered.asm.mixin.injection.Inject;
+          import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+          /** Atualiza texturas animadas (agua, lava, fogo...) so a cada N ticks. Ajuda bastante com pack HD. */
+          @Mixin(SpriteAtlasTexture.class)
+          public abstract class SpriteAtlasTextureMixin {
+
+              @Unique
+              private int renderlite$tickCounter;
+
+              @Inject(method = "tickAnimatedSprites", at = @At("HEAD"), cancellable = true)
+              private void renderlite$throttle(CallbackInfo ci) {
+                  int interval = Config.ANIMATION_INTERVAL;
+                  if (interval > 1 && renderlite$tickCounter++ % interval != 0) {
+                      ci.cancel();
+                  }
+              }
+          }
+          RL_EOF
+
+      - name: Compilar
+        run: gradle build --no-daemon
+
+      - name: Salvar jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: renderlite-jar
+          path: build/libs/*.jar
+          if-no-files-found: error
